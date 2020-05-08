@@ -527,9 +527,13 @@ class CellposeModel():
         styles /= IMG.shape[0]
         ## y%4==1 undo vfilp, ==2 undo hflip ==3 undo vhflip
         y = transforms.unaugment_tiles(y)
-        ##
+        ## tiles multiplied by a guassian-like mask with max at around(center-bsize/4 to cetner+bsize/4)
+        ## then patched together and normalized by the sum of mask value it multiplied. 
         yf = transforms.average_tiles(y, ysub, xsub, Ly, Lx)
+        ## if image size < bsize, after tiling the yf dim could be larger than original
+        ## crop out the original size 
         yf = yf[:,:imgi.shape[1],:imgi.shape[2]]
+        ## divided by the root sum of squared (RSS), kind of normalization across tiles ?
         styles /= (styles**2).sum()**0.5
         del IMG 
         gc.collect()
