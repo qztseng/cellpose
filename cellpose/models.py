@@ -506,6 +506,8 @@ class CellposeModel():
             1D array summarizing the style of the image, averaged over tiles
             
         """
+        ## IMG are subregions of size=bsize, IMG are augmented as well (not n regions * 4 augs)
+        ## but n%4==1 aug1, ==2 aug2, ==3 aug3, ==0 no aug
         IMG, ysub, xsub, Ly, Lx = transforms.make_tiles(imgi, bsize, augment=True)
         IMG = nd.array(IMG, ctx=self.device)
         nbatch = self.batch_size
@@ -514,12 +516,18 @@ class CellposeModel():
         for k in range(niter):
             irange = np.arange(nbatch*k, min(IMG.shape[0], nbatch*k+nbatch))
             y0, style = self.net(IMG[irange])
+            ## y0.shape = (bs,3,bsize, bsize); style.shape=(bs,256) 
             y[irange] = y0.asnumpy()
             if k==0:
+                ## set styles base value using the first tile style (top-left corner w/o augment)
                 styles = style.asnumpy()[0]
+            ## take sum of style (bs, 256) over bs and add to base value
             styles += style.asnumpy().sum(axis=0)
+        ## divide styles by the ntiles (get average style value per tile, but the first tile was counted twice?)
         styles /= IMG.shape[0]
+        ## y%4==1 undo vfilp, ==2 undo hflip ==3 undo vhflip
         y = transforms.unaugment_tiles(y)
+        ##
         yf = transforms.average_tiles(y, ysub, xsub, Ly, Lx)
         yf = yf[:,:imgi.shape[1],:imgi.shape[2]]
         styles /= (styles**2).sum()**0.5
@@ -575,19 +583,20 @@ class CellposeModel():
         
         # pad for net so divisible by 4
         img, ysub, xsub = transforms.pad_image_ND(img)
+        ## cut image into k subregion of bsize(default=224), and apply augmentation(vflip, hflip, vhflip)
+        ## the augmentations are not on each tile but k%4==1 vflip, k%4==2, hflip, k%4==3 vhflip
         if tile:
             y,style = self._run_tiled(img, bsize)
+            ## output channel first , turn it into channel last
             y = np.transpose(y[:3], (1,2,0))
         else:
             ## add empty dimension at the beginning (single prediction)
             img = nd.array(np.expand_dims(img, axis=0), ctx=self.device)
-            ## the output y from net(img) is probability, y flow, x flow
+            ## the output y from net(img) is channel first
             y,style = self.net(img)
             img = img.asnumpy()
             ## y[0] because only one input and first dimension was added as empty dim. 
-            ## turn it into y[0] is Y flow; y[1] is X flow; y[2] is cell probability
-            ## loss = probability + flow loww
-            ## loss = criterion(y[:,:-1] , veci) + criterion2(y[:,-1] , lbl)
+            ## turn y into channel last
             y = np.transpose(y[0].asnumpy(), (1,2,0))
             style = style.asnumpy()[0]
             ## why set style to [1,1,1,1,....1]?
