@@ -161,7 +161,7 @@ class Cellpose():
                 diams = diameter * np.ones(len(x), np.float32)
             else:
                 diams = diameter
-            ## diam_ratio*sqrt(pi)/2 --> sqrt(Area); diam_mean=27, diam=30 
+            ## diams is circular scale, * sqrt(pi)/2 becomes pixel scale (e.g. 30 become 27)
             rescale = self.diam_mean / (diams.copy() * (np.pi**0.5/2))
         else:
             if rescale is not None and (not isinstance(rescale, list) or len(rescale)==1):
@@ -172,6 +172,7 @@ class Cellpose():
                 diams, diams_style = self.sz.eval(x, channels=channels, invert=invert, batch_size=self.batch_size, tile=tile)
                 ## one of the diams was actually area ? so need to * or / sqrt(pi)/2 for conversion ?
                 rescale = self.diam_mean / diams.copy()
+                ## the diams from sz.eval is in pixel scale, /= sqrt(pi)/2 becomes circular scale
                 diams /= (np.pi**0.5/2) # convert to circular
                 print('estimated cell diameters for all images')
             else:
@@ -533,7 +534,7 @@ class CellposeModel():
         ## if image size < bsize, after tiling the yf dim could be larger than original
         ## crop out the original size 
         yf = yf[:,:imgi.shape[1],:imgi.shape[2]]
-        ## divided by the root sum of squared (RSS), kind of normalization across tiles ?
+        ## divided by the root sum of squared (RSS), kind of normalization across tiles ? (normalized by total variance)
         styles /= (styles**2).sum()**0.5
         del IMG 
         gc.collect()
@@ -590,6 +591,7 @@ class CellposeModel():
         ## cut image into k subregion of bsize(default=224), and apply augmentation(vflip, hflip, vhflip)
         ## the augmentations are not on each tile but k%4==1 vflip, k%4==2, hflip, k%4==3 vhflip
         if tile:
+            ## _run_tiled will return averaged(weighted by tapered mask) y from patches (some augmented) 
             y,style = self._run_tiled(img, bsize)
             ## output channel first , turn it into channel last
             y = np.transpose(y[:3], (1,2,0))
