@@ -610,7 +610,7 @@ class CellposeModel():
         
         ## recrop the padded image to its original 
         y = y[np.ix_(ysub, xsub, np.arange(3))]
-        ## ?? why take sqr sum then sqrt ? to have all value positive ?
+        ## style normalized by its variance (root sum squared, RSS)
         style /= (style**2).sum()**0.5     
         if rsz!=1.0:
             ## resize the output to original size (img.shape)
