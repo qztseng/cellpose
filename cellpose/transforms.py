@@ -121,6 +121,7 @@ def make_tiles(imgi, bsize=224, augment=True):
     """
 
     bsize = np.int32(bsize)
+    ## take the last 3 dims, ignoring the batch dimension 
     nchan, Ly0, Lx0 = imgi.shape[-3:]
     # pad if image smaller than bsize
     if Ly0<bsize:
@@ -133,6 +134,7 @@ def make_tiles(imgi, bsize=224, augment=True):
     # tile starts
     ystart = np.arange(0, Ly-bsize//2, bsize//2)
     xstart = np.arange(0, Lx-bsize//2, bsize//2)
+    ## make sure the last tile is of size bsize
     ystart = np.maximum(0, np.minimum(Ly-bsize, ystart))
     xstart = np.maximum(0, np.minimum(Lx-bsize, xstart))
 
@@ -146,11 +148,13 @@ def make_tiles(imgi, bsize=224, augment=True):
             ysub.append([ystart[j], ystart[j]+bsize])
             xsub.append([xstart[i], xstart[i]+bsize])
 
+            ## j cuts in Ly, i cuts in Lx, total subtiles = j*i
             IMG[j,i,:,:,:] = imgi[:, ysub[-1][0]:ysub[-1][1],  xsub[-1][0]:xsub[-1][1]]
-
+    # turn j, i into j*i
     IMG = np.reshape(IMG, (-1, nchan, bsize,bsize))
 
     # "augment" images
+    ## augment j*i subtiles (the argument "augment" is not used at all)
     for k in range(IMG.shape[0]):
         if k%4==1:
             IMG[k, :,:, :] = IMG[k, :,::-1, :]

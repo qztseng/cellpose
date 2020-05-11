@@ -53,16 +53,19 @@ class Cellpose():
         model_dir = pathlib.Path.home().joinpath('.cellpose', 'models')
         if model_type is None:
             model_type = 'cyto'
-        
+        ## There are 4 models loaded for emsembling the prediction by averaging 
         self.pretrained_model = [os.fspath(model_dir.joinpath('%s_%d'%(model_type,j))) for j in range(4)]
+        ## One size models which take style output and predict sizes (trained by linear regression?)
         self.pretrained_size = os.fspath(model_dir.joinpath('size_%s_0.npy'%(model_type)))
         if model_type=='cyto':
+            ## how this value was defined, median object size from all the training data ?
             self.diam_mean = 27.
         else:
             self.diam_mean = 15.
         if not os.path.isfile(self.pretrained_model[0]):
             download_model_weights()
         if not net_avg:
+            ## Don't do ensembling. Only use the 1st model for prediction
             self.pretrained_model = self.pretrained_model[0]
         
         self.cp = CellposeModel(device=self.device,
@@ -158,13 +161,18 @@ class Cellpose():
                 diams = diameter * np.ones(len(x), np.float32)
             else:
                 diams = diameter
+            ## diams is circular scale, * sqrt(pi)/2 becomes pixel scale (e.g. 30 become 27)
             rescale = self.diam_mean / (diams.copy() * (np.pi**0.5/2))
         else:
             if rescale is not None and (not isinstance(rescale, list) or len(rescale)==1):
+                ## when no diameter was given but gave rescale factor directly
                 rescale = rescale * np.ones(len(x), np.float32)
             if self.pretrained_size is not None and rescale is None and not do_3D:
+                ## predict diameter from style if neither diameter and rescale was given
                 diams, diams_style = self.sz.eval(x, channels=channels, invert=invert, batch_size=self.batch_size, tile=tile)
+                ## one of the diams was actually area ? so need to * or / sqrt(pi)/2 for conversion ?
                 rescale = self.diam_mean / diams.copy()
+                ## the diams from sz.eval is in pixel scale, /= sqrt(pi)/2 becomes circular scale
                 diams /= (np.pi**0.5/2) # convert to circular
                 print('estimated cell diameters for all images')
             else:
@@ -174,7 +182,7 @@ class Cellpose():
                     else:
                         rescale = np.ones(len(x), np.float32)
                 diams = self.diam_mean / rescale.copy() / (np.pi**0.5/2)
-            
+        ## at eval phase, input img will * rescale. e.g. if diams=30, img.shape will *0.9  (27/30=0.9)
         masks, flows, styles = self.cp.eval(x, invert=invert, rescale=rescale, channels=channels, tile=tile,
                                             do_3D=do_3D, net_avg=net_avg, progress=progress,
                                             flow_threshold=flow_threshold, cellprob_threshold=cellprob_threshold)
@@ -233,6 +241,7 @@ class CellposeModel():
 
         self.pretrained_model = pretrained_model
         self.batch_size=batch_size
+        ## the built-in model parameter: 27
         self.diam_mean = diam_mean
 
         nbase = [32,64,128,256]
@@ -319,9 +328,13 @@ class CellposeModel():
         """
         nimg = len(x)
         if channels is not None:
+            ## none grayscale mode
             if len(channels)==2:
                 if not isinstance(channels[0], list):
                     channels = [channels for i in range(nimg)]
+            ## transforms.reshape will turn inputs of 1,2 or 3 color channels input into 2 channels
+            ## grayscale by taking mean of 3 channels + zero, or grayscale as origin, or 2 channels specified
+            ## by the channels argument
             x = [transforms.reshape(x[i], channels=channels[i], invert=invert) for i in range(nimg)]
         elif do_3D:
             x = [np.transpose(x[i], (3,0,1,2)) for i in range(len(x))]
@@ -346,12 +359,17 @@ class CellposeModel():
             for i in iterator:
                 img = x[i].copy()
                 if img.shape[0]<3:
+                    ## for image with channel first , move channel dimension to last
+                    ## how about images with 3 color channels? 
                     img = np.transpose(img, (1,2,0))
                 Ly,Lx = img.shape[:2]
                 if img.shape[-1]==1:
+                    ## add one extra channel filled with zero for single channel images 
+                    ## e.g. (128,128,1) --> (128,128,2)
                     img = np.concatenate((img, 0.*img), axis=-1)
                 #tic=time.time()
                 if isinstance(self.pretrained_model, str) or not net_avg:
+                    ## no ensembling, single model mode
                     y, style = self._run_net(img, rescale[i], tile)
                 else:
                     y, style = self._run_many(img, rescale[i], tile)
@@ -489,6 +507,8 @@ class CellposeModel():
             1D array summarizing the style of the image, averaged over tiles
             
         """
+        ## IMG are subregions of size=bsize, IMG are augmented as well (not n regions * 4 augs)
+        ## but n%4==1 aug1, ==2 aug2, ==3 aug3, ==0 no aug
         IMG, ysub, xsub, Ly, Lx = transforms.make_tiles(imgi, bsize, augment=True)
         IMG = nd.array(IMG, ctx=self.device)
         nbatch = self.batch_size
@@ -497,19 +517,30 @@ class CellposeModel():
         for k in range(niter):
             irange = np.arange(nbatch*k, min(IMG.shape[0], nbatch*k+nbatch))
             y0, style = self.net(IMG[irange])
+            ## y0.shape = (bs,3,bsize, bsize); style.shape=(bs,256) 
             y[irange] = y0.asnumpy()
             if k==0:
+                ## set styles base value using the first tile style (top-left corner w/o augment)
                 styles = style.asnumpy()[0]
+            ## take sum of style (bs, 256) over bs and add to base value
             styles += style.asnumpy().sum(axis=0)
+        ## divide styles by the ntiles (get average style value per tile, but the first tile was counted twice?)
         styles /= IMG.shape[0]
+        ## y%4==1 undo vfilp, ==2 undo hflip ==3 undo vhflip
         y = transforms.unaugment_tiles(y)
+        ## tiles multiplied by a guassian-like mask with max at around(center-bsize/4 to cetner+bsize/4)
+        ## then patched together and normalized by the sum of mask value it multiplied. 
         yf = transforms.average_tiles(y, ysub, xsub, Ly, Lx)
+        ## if image size < bsize, after tiling the yf dim could be larger than original
+        ## crop out the original size 
         yf = yf[:,:imgi.shape[1],:imgi.shape[2]]
+        ## divided by the root sum of squared (RSS), kind of normalization across tiles ? (normalized by total variance)
         styles /= (styles**2).sum()**0.5
         del IMG 
         gc.collect()
         return yf, styles
-
+    
+    ## rsz = rescale
     def _run_net(self, img, rsz=1.0, tile=True, bsize=224):
         """ run network on image
 
@@ -539,6 +570,7 @@ class CellposeModel():
             
         """
         shape = img.shape
+        ## resize input image by multiply rescale (rsz)
         if abs(rsz - 1.0) < 0.03:
             rsz = 1.0
             Ly,Lx = img.shape[:2]
@@ -548,26 +580,40 @@ class CellposeModel():
             img = cv2.resize(img, (Lx, Ly))
 
         # make image nchan x Ly x Lx for net
+        ## normally the input after transforms.reshape is already ndim>=3 ?
         if img.ndim<3:
             img = np.expand_dims(img, axis=-1)
+        ## move channel dim to first
         img = np.transpose(img, (2,0,1))
         
         # pad for net so divisible by 4
         img, ysub, xsub = transforms.pad_image_ND(img)
+        ## cut image into k subregion of bsize(default=224), and apply augmentation(vflip, hflip, vhflip)
+        ## the augmentations are not on each tile but k%4==1 vflip, k%4==2, hflip, k%4==3 vhflip
         if tile:
+            ## _run_tiled will return averaged(weighted by tapered mask) y from patches (some augmented) 
             y,style = self._run_tiled(img, bsize)
+            ## output channel first , turn it into channel last
             y = np.transpose(y[:3], (1,2,0))
         else:
+            ## add empty dimension at the beginning (single prediction)
             img = nd.array(np.expand_dims(img, axis=0), ctx=self.device)
+            ## the output y from net(img) is channel first
             y,style = self.net(img)
             img = img.asnumpy()
+            ## y[0] because only one input and first dimension was added as empty dim. 
+            ## turn y into channel last
             y = np.transpose(y[0].asnumpy(), (1,2,0))
             style = style.asnumpy()[0]
+            ## why set style to [1,1,1,1,....1]?
             style = np.ones(10)
         
+        ## recrop the padded image to its original 
         y = y[np.ix_(ysub, xsub, np.arange(3))]
+        ## ?? why take sqr sum then sqrt ? to have all value positive ?
         style /= (style**2).sum()**0.5     
         if rsz!=1.0:
+            ## resize the output to original size (img.shape)
             y = cv2.resize(y, (shape[1], shape[0]))
         return y, style
 
@@ -664,23 +710,31 @@ class CellposeModel():
                 trainer.set_learning_rate(LR)
             for ibatch in range(0,nimg,batch_size):
                 if rescale:
+                    ## the object size ratio between current images and model default (diam_mean=27)
                     rsc = diam_train[rperm[ibatch:ibatch+batch_size]] / self.diam_mean
                 else:
+                    ## no rescaling, take the images as it is.
                     rsc = np.ones(len(rperm[ibatch:ibatch+batch_size]), np.float32)
-                
+                ## Rescale the images and do augmentation with scale_range(0.5-1.5)
                 imgi, lbl, _ = transforms.random_rotate_and_resize(
                                         [train_data[i] for i in rperm[ibatch:ibatch+batch_size]],
                                         Y=[train_flows[i] for i in rperm[ibatch:ibatch+batch_size]],
                                         rescale=rsc, scale_range=scale_range)
+                ## A context (ctx) describes the device type and ID on which computation should be carried on.
                 X    = nd.array(imgi, ctx=self.device)
+                ## if unet = true --> only predict inside/outside pixels (sementic segmentation) w/o flow prediction
                 if not self.unet:
+                    ## lbl[:, 1:] are the x-flow and y-flow. Why * 5 ?
                     veci = 5. * nd.array(lbl[:,1:], ctx=self.device)
+                ## lbl[:,0] is the probability (whether pixels are inside or outside mask). Take all pixel >0.5 as True
                 lbl  = nd.array(lbl[:,0]>.5, ctx=self.device)
                 with mx.autograd.record():
                     y, style = self.net(X)
                     if self.unet:
+                        ## only calculate probability loss
                         loss = criterion2(y[:,-1] , lbl)
                     else:
+                        ## loss = probability + flow loww
                         loss = criterion(y[:,:-1] , veci) + criterion2(y[:,-1] , lbl)
 
                 loss.backward()
@@ -689,6 +743,7 @@ class CellposeModel():
                 nsum+=len(loss)
                 if iepoch>0:
                     trainer.step(batch_size)
+            ## reduce LR by half every 10 epoch in the last 100 epoch
             if iepoch>self.n_epochs-100 and iepoch%10==1:
                 LR = LR/2
                 trainer.set_learning_rate(LR)
