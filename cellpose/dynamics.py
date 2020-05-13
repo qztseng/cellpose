@@ -137,7 +137,10 @@ def masks_to_flows(masks):
     nmask = masks.max()
     slices = scipy.ndimage.find_objects(masks)
     dia = utils.diameters(masks)[0]
-    s2 = (.15 * dia)**2
+    ## 0.15 is the factor of cell center to mask area (only inner most 15% are counted in mu_c). 
+    ## If 1.0, then the whole mask is preserved with center value =1 and goes down to 0 toward periphery
+    ## but the mu_c is not used at all ?!
+    s2 = (0.15 * dia)**2
     for i,si in enumerate(slices):
         if si is not None:
             sr,sc = si

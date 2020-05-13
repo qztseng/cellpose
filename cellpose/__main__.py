@@ -71,6 +71,7 @@ if __name__ == '__main__':
     parser.add_argument('--cellprob_threshold', required=False, 
                         default=0.0, type=float, help='cell probability threshold, centered at 0.0')
     parser.add_argument('--save_png', action='store_true', help='save masks as png')
+    parser.add_argument('--mask_only', action='store_true', help='only output mask file')
 
     # settings for training
     parser.add_argument('--mask_filter', required=False, 
@@ -123,6 +124,8 @@ if __name__ == '__main__':
             use_gpu = utils.use_gpu()
         if use_gpu:
             device = mx.gpu()
+            if not args.train:
+                os.environ['MXNET_CUDNN_AUTOTUNE_DEFAULT'] = "0"
         else:
             device = mx.cpu()
         print('>>>> using %s'%(['CPU', 'GPU'][use_gpu]))
@@ -171,9 +174,12 @@ if __name__ == '__main__':
                 diams = diameter * np.ones(len(images)) 
                   
             print('>>>> saving results')
-            io.masks_flows_to_seg(images, masks, flows, diams, image_names, channels)
-            if args.save_png:
-                io.save_to_png(images, masks, flows, image_names)
+            if args.mask_only:
+                io.save_to_png(images, masks, flows, image_names, maskonly=True)
+            else:
+                io.masks_flows_to_seg(images, masks, flows, diams, image_names, channels)
+                if args.save_png:
+                    io.save_to_png(images, masks, flows, image_names)
                     
         else:
             if args.pretrained_model=='cyto' or args.pretrained_model=='nuclei':

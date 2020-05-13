@@ -56,10 +56,9 @@ def masks_flows_to_seg(images, masks, flows, diams, file_names, channels=None):
             flowi.append(flows[n][0][np.newaxis,...])
         else:
             flowi.append(flows[n][0])
-        print(flowi[0].shape)
         flowi.append((np.clip(transforms.normalize99(flows[n][2]),0,1) * 255).astype(np.uint8)[np.newaxis,...])
         if flows[n][0].ndim==3:
-            flowi.append(np.zeros(flows[1][0].shape, dtype=np.uint8))
+            flowi.append(np.zeros(flows[n][1][0].shape, dtype=np.uint8))
             flowi[-1] = flowi[-1][np.newaxis,...]
         else:
             flowi.append((flows[n][1][0]/10 * 127 + 127).astype(np.uint8))
@@ -80,7 +79,7 @@ def masks_flows_to_seg(images, masks, flows, diams, file_names, channels=None):
                      'flows': flowi,
                      'est_diam': diams[n]})
 
-def save_to_png(images, masks, flows, file_names):
+def save_to_png(images, masks, flows, file_names, maskonly=False):
     """ save masks + nicely plotted segmentation image to png 
 
     masks[k] for images[k] are saved to file_names[k]+'_cp_masks.png'
@@ -114,13 +113,14 @@ def save_to_png(images, masks, flows, file_names):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             skimage.io.imsave(base+'_cp_masks.png', masks[n].astype(np.uint16))
-        maski = masks[n]
-        flowi = flows[n][0]
-        fig = plt.figure(figsize=(12,3))
-        # can save images (set save_dir=None if not)
-        plot.show_segmentation(fig, img, maski, flowi)
-        fig.savefig(base+'_cp.png', dpi=300)
-        plt.close(fig)
+        if not maskonly:
+            maski = masks[n]
+            flowi = flows[n][0]
+            fig = plt.figure(figsize=(12,3))
+            # can save images (set save_dir=None if not)
+            plot.show_segmentation(fig, img, maski, flowi)
+            fig.savefig(base+'_cp.png', dpi=300)
+            plt.close(fig)
 
 def save_server(parent=None, filename=None):
     """ Uploads a *_seg.npy file to the bucket.
