@@ -44,7 +44,12 @@ def _extend_centers(T,y,x,ymed,xmed,Lx, niter):
         amount of diffused particles at each pixel
 
     """
-
+    ## The function here is somehow similar to distance tranform where 
+    ## center pixel will have highest value while border pixels go down to zero
+    ## The T[y*Lx + x] is original pixel array (in 1D),T[(y-1)*Lx + x] is shifted 1pixel in y
+    ## T[y*Lx + x+1] is shifted 1pixel in x. So adding them up is the same as looping through each pixel 
+    ## then add up the 8 pixels surrending it (plus itself). But the calculation is done in one go as 
+    ## y and x are arrays
     for t in range(niter):
         T[ymed*Lx + xmed] += 1
         T[y*Lx + x] = 1/9. * (T[y*Lx + x] + T[(y-1)*Lx + x]   + T[(y+1)*Lx + x] +
@@ -166,6 +171,7 @@ def masks_to_flows(masks):
             dx = T[y*lx + x+1] - T[y*lx + x-1]
             mu[:, sr.start+y-1, sc.start+x-1] = np.stack((dy,dx))
 
+    ## normalized by sqrt(dx^2+dy^2), obtain relative value regarding to each mask(heat source)?
     mu /= (1e-20 + (mu**2).sum(axis=0)**0.5)
 
     return mu, mu_c
