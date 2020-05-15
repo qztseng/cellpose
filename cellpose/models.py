@@ -381,6 +381,7 @@ class CellposeModel():
                     if not self.unet:
                         dP = np.stack((y[...,0], y[...,1]), axis=0)
                         niter = 1 / rescale[i] * 200
+                        ## dP divided by 5 because during training, the target flow (label converted to mu:np.stack(dy,dx)) was multiplied by 5
                         p = dynamics.follow_flows(-1 * dP  / 5. , niter=niter)
                         if progress is not None:
                             progress.setValue(65)
@@ -766,6 +767,9 @@ class CellposeModel():
                                             scale_range=0., rescale=rsc)
                         X    = nd.array(imgi, ctx=self.device)
                         if not self.unet:
+                            ## here the mu (dx, dy flow derivative fields) values are multiplied by 5 (why??)
+                            ## such that the maximum gradient is not 1 as originally normalized by sqrt(dx^2+dy^2)
+                            ## So in the reconstruction phase, the dP was divided by 5 again
                             veci = 5. * nd.array(lbl[:,1:], ctx=self.device)
                         lbl  = nd.array(lbl[:,0]>.5, ctx=self.device)
                         y, style = self.net(X)
