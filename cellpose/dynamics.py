@@ -286,6 +286,7 @@ def follow_flows(dP, niter=200):
         p = np.array(p).astype(np.float32)
         # run dynamics on subset of pixels
         inds = np.array(np.nonzero(np.abs(dP[0])>1e-3)).astype(np.int32).T
+        #inds = np.array(np.nonzero((np.abs(dP[0])>0) | (np.abs(dP[1])>0) )).astype(np.int32).T
         p = steps2D(p, dP, inds, niter)
     return p
 
