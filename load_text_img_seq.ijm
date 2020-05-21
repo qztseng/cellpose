@@ -1,10 +1,10 @@
 //dir = getDirectory("Choose a Directory");
-dir = '/home/lis-paul/cellpose/notebooks/output/';
-prefix = 'px_';
+dir = '/home/lis-paul/cellpose/notebooks/output2/';
+prefix = 'pxs_';
 
 setBatchMode(true);
 flist = getFileList(dir);
-for (i = 0; i < 30; i++) {
+for (i = 0; i < 200; i++) {
 	//print(flist[i]);
 	fname = prefix+i+'.txt';
 	run("Text Image... ", "open="+dir+fname+"");

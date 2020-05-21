@@ -2,6 +2,8 @@ from scipy.ndimage.filters import maximum_filter1d
 import scipy.ndimage
 import skimage.morphology
 import numpy as np
+import numpy.ma as ma
+import skfmm
 from tqdm import trange
 import time
 import mxnet as mx
@@ -176,6 +178,44 @@ def masks_to_flows(masks):
 
     return mu, mu_c
 
+
+def masks_to_flows2(masks):
+    """ 
+    use the geodesics distance transform and np.gradient to create flow map
+    3D is not yet tested thus not implemented. 
+    mu_c in the original function not used
+    """
+    if masks.ndim > 2:
+        raise ValueError('3D input not yet implemented')
+
+    Ly, Lx = masks.shape
+    mu = np.zeros((2, Ly, Lx), np.float64)
+
+    slices = scipy.ndimage.find_objects(masks)
+    for i,si in enumerate(slices):
+        if si is not None:
+            sr,sc = si
+            submask = masks[si]
+            m = submask!=(i+1)
+            y,x = np.nonzero(~m)
+
+            centroid = scipy.ndimage.measurements.center_of_mass(submask, labels=submask, index=(i+1))
+            c = tuple(np.round(np.array(centroid)).astype(int))
+            ## set the centroid to 0 as the for GDT
+            submask[c]=0 
+            m_submask = ma.masked_array(submask, m)
+            ## do GDT with regard to the mask center (0)
+            gdt = skfmm.distance(m_submask)
+            ## Calculate the derivatives in y,x 
+            g_dy, g_dx = np.gradient(gdt, 1, edge_order=1)
+            ## do a 3x3 mean filter to smooth out the border values (to avoid zero gradient at some pixels)
+            smoothed_y = ma.masked_array(scipy.ndimage.uniform_filter(ma.filled(g_dy,0), size=3),m)
+            smoothed_x = ma.masked_array(scipy.ndimage.uniform_filter(ma.filled(g_dx,0), size=3),m)
+            mu[:, sr.start + y, sc.start + x] = np.stack((smoothed_y.compressed(),smoothed_x.compressed()))
+
+    return mu
+
+
 @njit('(float32[:,:,:,:],float32[:,:,:,:], int32[:,:], int32)')
 def steps3D(p, dP, inds, niter):
     """ run dynamics of pixels to recover masks in 3D
@@ -291,8 +331,8 @@ def follow_flows(dP, niter=200):
         p = np.meshgrid(np.arange(shape[0]), np.arange(shape[1]), indexing='ij')
         p = np.array(p).astype(np.float32)
         # run dynamics on subset of pixels
-        inds = np.array(np.nonzero(np.abs(dP[0])>1e-3)).astype(np.int32).T
-        #inds = np.array(np.nonzero((np.abs(dP[0])>0) | (np.abs(dP[1])>0) )).astype(np.int32).T
+#         inds = np.array(np.nonzero(np.abs(dP[0])>1e-3)).astype(np.int32).T
+        inds = np.array(np.nonzero((np.abs(dP[0])>0) | (np.abs(dP[1])>0) )).astype(np.int32).T
         p = steps2D(p, dP, inds, niter)
     return p
 
@@ -389,6 +429,7 @@ def get_masks(p, iscell=None, rpad=20, flows=None, threshold=0.4):
         pflows.append(p[i].flatten().astype('int32'))
         edges.append(np.arange(-.5-rpad, shape0[i]+.5+rpad, 1))
 
+    ## h has dimension p.x + 2*pad, p.y + 2*pad
     h,_ = np.histogramdd(tuple(pflows), bins=edges)
     hmax = h.copy()
     for i in range(dims):
@@ -410,33 +451,53 @@ def get_masks(p, iscell=None, rpad=20, flows=None, threshold=0.4):
     for e in expand:
         e = np.expand_dims(e,1)
 
+    ## why do 5 iteration?
+    ## pix = list of the original peak pixel coordiates at h (seed array)
     for iter in range(5):
+        ## loop through each peak pixel 
         for k in range(len(pix)):
+            ## turn pix[k] array of (x,y) into list for pix[k][i] element assignment 
             if iter==0:
                 pix[k] = list(pix[k])
             newpix = []
             iin = []
             for i,e in enumerate(expand):
+                ## epix is the indics of y-1, y, y+1; x-1, x, x+1; where x,y is the peak/center identified in h (seed)
                 epix = e[:,np.newaxis] + np.expand_dims(pix[k][i], 0) - 1
                 epix = epix.flatten()
+                ## check whether coordinates are within the image bondaries
                 iin.append(np.logical_and(epix>=0, epix<shape[i]))
                 newpix.append(epix)
+            ## check in all axis (x,y,z) whether any out of boundary coordinates exist
             iin = np.all(tuple(iin), axis=0)
+            ## remove out of boundary coordinates from newpix list of arrays [array(y-1, y, y+1), array(x-1, x, x+1)]
+            ## but newpix won't be modified inplace within the loop....
+            ## should use enumerate(newpix) and newpix[i] = p[iin] instead
             for p in newpix:
                 p = p[iin]
+            ## probably not required to turn a list into tuple (if just for indexing)
             newpix = tuple(newpix)
+            ## why do the peak count filtering again ? as already done in the seed creation step
             igood = h[newpix]>2
             for i in range(dims):
+                ## only possible after turn pix[k] array into list
                 pix[k][i] = newpix[i][igood]
             if iter==4:
+                ## change pix from list into tuple at the end of iteration
                 pix[k] = tuple(pix[k])
     
     M = np.zeros(h.shape, np.int32)
+    ## fill M at the filtered peak(center)pixel with label number (from 1 to nmask)
     for k in range(len(pix)):
         M[pix[k]] = 1+k
         
+    ## pad the pflows 1D array to be aligned with the dimension of h/M (padded with rpad)
     for i in range(dims):
         pflows[i] = pflows[i] + rpad
+    
+    ## M0 after indexing with padded pflows turns pflows(p in 1D) pixel values into the mask label is belongs to
+    ## which originally indicate the mask center coordinates.
+    ## M0 dimension is the cropped M (with unpadded dimension as pflows (padded))
     M0 = M[tuple(pflows)]
     _,counts = np.unique(M0, return_counts=True)
     
@@ -444,9 +505,14 @@ def get_masks(p, iscell=None, rpad=20, flows=None, threshold=0.4):
     big = shape0[0] * shape0[1] * 0.35
     for i in np.nonzero(counts > big)[0]:
         M0[M0==i] = 0
+    
+    ## renumber the labels by np.unique after removing the big masks
     _,M0 = np.unique(M0, return_inverse=True)
     M0 = np.reshape(M0, shape0)
 
+    ## compare the dP calculated from the predicted mask with the dP directly from the model
+    ## since the predicted mask is also calculated from the dP of model output. It is basically the
+    ## error of backward/forward conversion between dP and mask
     if threshold is not None and threshold > 0 and flows is not None:
         M0 = remove_bad_flow_masks(M0, flows, threshold=threshold)
         _,M0 = np.unique(M0, return_inverse=True)
