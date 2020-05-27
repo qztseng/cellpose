@@ -6,11 +6,12 @@ import tempfile
 
 from scipy.ndimage import median_filter
 import cv2
+import math
 
 from mxnet import gluon, nd
 import mxnet as mx
 
-from . import transforms, dynamics, utils, resnet_style, plot
+from . import transforms, dynamics, utils, resnet_style, plot, lr_schedular
 import __main__
 
 class Cellpose():
@@ -618,7 +619,7 @@ class CellposeModel():
             y = cv2.resize(y, (shape[1], shape[0]))
         return y, style
 
-    def train(self, train_data, train_labels, test_data=None, test_labels=None, channels=None,
+    def train(self, train_data, train_labels, test_data=None, test_labels=None, channels=None, train_flows=None, test_flows=None,
               pretrained_model=None, save_path=None, save_every=100, 
               learning_rate=0.2, n_epochs=500, weight_decay=0.00001, batch_size=8, rescale=True):
 
@@ -629,9 +630,8 @@ class CellposeModel():
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
         self.momentum = 0.9
-        
+
         nimg = len(train_data)
-        
         # check that arrays are correct size
         if nimg != len(train_labels):
             raise ValueError('train data and labels not same length')
@@ -644,26 +644,28 @@ class CellposeModel():
         if not (test_data is not None and test_labels is not None and 
                 len(test_data) > 0 and len(test_data)==len(test_labels)):
             test_data = None
-        
+
         # make data correct shape and normalize it so that 0 and 1 are 1st and 99th percentile of data
         train_data, test_data, run_test = transforms.reshape_data(train_data, test_data=test_data, channels=channels)
         if train_data is None:
             raise ValueError('training data do not all have the same number of channels')
             return
         nchan = train_data[0].shape[0]
-        
+
         if not run_test:
             print('NOTE: test data not provided OR labels incorrect OR not same number of channels as train data')        
 
         # check if train_labels have flows
         if not self.unet:
-            train_flows = dynamics.labels_to_flows(train_labels)
+            if train_flows is None:
+                train_flows = dynamics.labels_to_flows(train_labels)
             if run_test:
-                test_flows = dynamics.labels_to_flows(test_labels)
+                if test_flows is None:
+                    test_flows = dynamics.labels_to_flows(test_labels)
         else:
             train_flows = list(map(np.uint16, train_labels))
             test_flows = list(map(np.uint16, test_labels))
-                
+
         # compute average cell diameter
         if rescale:
             diam_train = np.array([utils.diameters(train_labels[k])[0] for k in range(len(train_labels))])
@@ -682,17 +684,31 @@ class CellposeModel():
         print('>>>> ntrain = %d'%nimg)
         if run_test:
             print('>>>> ntest = %d'%len(test_data))
-        print(train_data[0].shape)
-
+#         print(train_data[0].shape)
+        
+        ## record loss in history
+        history = []
+        
+        ## create learning rate schedular
+        steps = math.ceil(nimg/self.batch_size)
+        total_steps = steps*self.n_epochs
+        lr_sch = lr_schedular.OneCycleSchedule(start_lr=self.learning_rate/25, 
+                                               max_lr=self.learning_rate, 
+                                               cycle_length=total_steps*0.9, 
+                                               cooldown_length=total_steps*0.1, 
+                                               finish_lr=1e-2*self.learning_rate/25)
+        
         criterion  = gluon.loss.L2Loss()
         criterion2 = gluon.loss.SigmoidBinaryCrossEntropyLoss()
-        trainer = gluon.Trainer(self.net.collect_params(), 'sgd',{'learning_rate': self.learning_rate,
+#         trainer = gluon.Trainer(self.net.collect_params(), 'sgd',{'learning_rate': self.learning_rate,
+#                                 'momentum': self.momentum, 'wd': self.weight_decay})
+#         trainer = gluon.Trainer(self.net.collect_params(), optimizer='Adam', 
+#                                 optimizer_params={'learning_rate':self.learning_rate})
+        trainer = gluon.Trainer(self.net.collect_params(), 'sgd',{'lr_scheduler': lr_sch,
                                 'momentum': self.momentum, 'wd': self.weight_decay})
 
         eta = np.linspace(0, self.learning_rate, 10)
         tic = time.time()
-
-        lavg, nsum = 0, 0
 
         if save_path is not None:
             _, file_label = os.path.split(save_path)
@@ -706,54 +722,70 @@ class CellposeModel():
         for iepoch in range(self.n_epochs):
             np.random.seed(iepoch)
             rperm = np.random.permutation(nimg)
+            ## reset loss related vars
+            lavg, nsum = 0, 0
+            train_fl, train_pl = 0, 0
+
             if iepoch<len(eta):
                 LR = eta[iepoch]
-                trainer.set_learning_rate(LR)
+#                 trainer.set_learning_rate(LR)
             for ibatch in range(0,nimg,batch_size):
                 if rescale:
-                    ## the object size ratio between current images and model default (diam_mean=27)
+                    ## the object size ratio between current images and model default (diam_mean=27 for cyto, 15 for nuclei)
                     rsc = diam_train[rperm[ibatch:ibatch+batch_size]] / self.diam_mean
                 else:
                     ## no rescaling, take the images as it is.
                     rsc = np.ones(len(rperm[ibatch:ibatch+batch_size]), np.float32)
                 ## Rescale the images and do augmentation with scale_range(0.5-1.5)
+#                 print(f'diam_train:{diam_train}')
+#                 print(f'rescale:{rsc}')
                 imgi, lbl, _ = transforms.random_rotate_and_resize(
                                         [train_data[i] for i in rperm[ibatch:ibatch+batch_size]],
                                         Y=[train_flows[i] for i in rperm[ibatch:ibatch+batch_size]],
-                                        rescale=rsc, scale_range=scale_range)
+                                        rescale=rsc, scale_range=scale_range, xy=(256,256))
                 ## A context (ctx) describes the device type and ID on which computation should be carried on.
                 X    = nd.array(imgi, ctx=self.device)
                 ## if unet = true --> only predict inside/outside pixels (sementic segmentation) w/o flow prediction
                 if not self.unet:
                     ## lbl[:, 1:] are the x-flow and y-flow. Why * 5 ?
-                    veci = 5. * nd.array(lbl[:,1:], ctx=self.device)
+                    #veci = 5. * nd.array(lbl[:,1:], ctx=self.device)
+                    veci = nd.array(lbl[:,1:], ctx=self.device)
                 ## lbl[:,0] is the probability (whether pixels are inside or outside mask). Take all pixel >0.5 as True
-                lbl  = nd.array(lbl[:,0]>.5, ctx=self.device)
+                lbl  = nd.array(lbl[:,0]>0, ctx=self.device)
+
                 with mx.autograd.record():
                     y, style = self.net(X)
                     if self.unet:
                         ## only calculate probability loss
                         loss = criterion2(y[:,-1] , lbl)
                     else:
-                        ## loss = probability + flow loww
-                        loss = criterion(y[:,:-1] , veci) + criterion2(y[:,-1] , lbl)
-
+                        ## loss = probability + flow loss
+                        prob_loss = criterion2(y[:,-1] , lbl)
+                        flow_loss = criterion(y[:,:-1] , veci)
+                        loss = prob_loss + flow_loss
+                        #loss = criterion(y[:,:-1] , veci) + criterion2(y[:,-1] , lbl)
+    
                 loss.backward()
                 train_loss = nd.sum(loss).asscalar()
                 lavg += train_loss
+                train_fl += nd.sum(flow_loss).asscalar()
+                train_pl += nd.sum(prob_loss).asscalar()
                 nsum+=len(loss)
                 if iepoch>0:
                     trainer.step(batch_size)
             ## reduce LR by half every 10 epoch in the last 100 epoch
             if iepoch>self.n_epochs-100 and iepoch%10==1:
                 LR = LR/2
-                trainer.set_learning_rate(LR)
+#                 trainer.set_learning_rate(LR)
 
             if iepoch%10==0 or iepoch<10:
                 lavg = lavg / nsum
+                train_fl /= nsum
+                train_pl /= nsum
                 if run_test:
                     lavgt = 0
                     nsum = 0
+                    test_fl, test_pl =  0, 0
                     np.random.seed(42)
                     rperm = np.arange(0, len(test_data), 1, int)
                     for ibatch in range(0,len(test_data),batch_size):
@@ -764,35 +796,52 @@ class CellposeModel():
                         imgi, lbl, _ = transforms.random_rotate_and_resize(
                                             [test_data[i] for i in rperm[ibatch:ibatch+batch_size]],
                                             Y=[test_flows[i] for i in rperm[ibatch:ibatch+batch_size]],
-                                            scale_range=0., rescale=rsc)
+                                            scale_range=scale_range, rescale=rsc, xy=(256,256))
                         X    = nd.array(imgi, ctx=self.device)
                         if not self.unet:
                             ## here the mu (dx, dy flow derivative fields) values are multiplied by 5 (why??)
                             ## such that the maximum gradient is not 1 as originally normalized by sqrt(dx^2+dy^2)
                             ## So in the reconstruction phase, the dP was divided by 5 again
-                            veci = 5. * nd.array(lbl[:,1:], ctx=self.device)
+                            #veci = 5. * nd.array(lbl[:,1:], ctx=self.device)
+                            veci = nd.array(lbl[:,1:], ctx=self.device)
                         lbl  = nd.array(lbl[:,0]>.5, ctx=self.device)
                         y, style = self.net(X)
                         if self.unet:
                             loss = criterion2(y[:,-1] , lbl)
                         else:
-                            loss = criterion(y[:,:-1] , veci) + criterion2(y[:,-1] , lbl)
+                            prob_loss = criterion2(y[:,-1] , lbl)
+                            flow_loss = criterion(y[:,:-1] , veci)
+                            loss = prob_loss + flow_loss
+                            #loss = criterion(y[:,:-1] , veci) + criterion2(y[:,-1] , lbl)
                         lavgt += nd.sum(loss).asscalar()
+                        test_fl += nd.sum(flow_loss).asscalar()
+                        test_pl += nd.sum(prob_loss).asscalar()
                         nsum+=len(loss)
-                    print('Epoch %d, Time %4.1fs, Loss %2.4f, Loss Test %2.4f, LR %2.4f'%
-                            (iepoch, time.time()-tic, lavg, lavgt/nsum, LR))
+                        LR = trainer.learning_rate
+                    #print('Epoch %d, Time %4.1fs, Loss %2.4f, Loss Test %2.4f, LR %2.4f'%
+                    #        (iepoch, time.time()-tic, lavg, lavgt/nsum, LR))
+                    print(f'Epoch {iepoch}, Time {(time.time()-tic)} LR {LR:.4f}\n'
+                          f'Trainfl {train_fl:.4f} Trainpl {train_pl:.4f} Testfl {(test_fl/nsum):.4f} Testpl {(test_pl/nsum):.4f}\n'
+                          f'Loss {lavg:.4f} Test_Loss {(lavgt/nsum):.4f}')
+                    
+                    history.append(tuple((iepoch, lavg, lavgt/nsum, train_fl, train_pl, test_fl/nsum, test_pl/nsum, LR)))
                 else:
                     print('Epoch %d, Time %4.1fs, Loss %2.4f, LR %2.4f'%
                             (iepoch, time.time()-tic, lavg, LR))
-                lavg, nsum = 0, 0
+                    history.append(tuple((iepoch, lavg, train_fl, train_pl, LR)))
+#                 lavg, nsum = 0, 0
+#                 train_fl, train_pl =  0, 0
             
             if save_path is not None:
                 if iepoch==self.n_epochs-1 or iepoch%save_every==1:
                     # save model at the end
                     file = 'cellpose_{}_{}_{}'.format(self.unet, file_label, d.strftime("%Y_%m_%d_%H_%M_%S.%f"))                       
                     ksave += 1
-                    print('saving network parameters')
-                    self.net.save_parameters(os.path.join(file_path, file))
+                    fpath = os.path.join(file_path, file)
+                    print(f'saving network parameters to: {fpath}')
+                    self.net.save_parameters(fpath)
+            
+        return history
 
 class SizeModel():
     """ linear regression model for determining the size of objects in image

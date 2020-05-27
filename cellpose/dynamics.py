@@ -4,7 +4,8 @@ import skimage.morphology
 import numpy as np
 import numpy.ma as ma
 import skfmm
-from tqdm import trange
+# from tqdm import trange
+from tqdm.auto import trange
 import time
 import mxnet as mx
 import mxnet.ndarray as nd
@@ -179,6 +180,45 @@ def masks_to_flows(masks):
     return mu, mu_c
 
 
+def labels_to_flows2(labels):
+    """ Use GDT method to convert labels (list of masks or flows) 
+        to flows for training model.
+
+    Parameters
+    --------------
+
+    labels: list of ND-arrays
+        labels[k] can be 2D or 3D, if [3 x Ly x Lx] then it is assumed that flows were precomputed.
+        Otherwise labels[k][0] or labels[k] (if 2D) is used to create flows and cell probabilities.
+
+    Returns
+    --------------
+
+    flows: list of [3 x Ly x Lx] arrays
+        flows[k][0] is cell probability, flows[k][1] is Y flow, and flows[k][2] is X flow
+
+    """
+
+    nimg = len(labels)
+#     if labels[0].ndim < 3:
+#         labels = [labels[n][np.newaxis,:,:] for n in range(nimg)]
+
+    if labels[0].shape[0] == 1 or labels[0].ndim < 3:
+        print('NOTE: computing flows for labels (could be done before to save time)')
+        # compute flows and median diameter
+        veci, diam = zip(*[masks_to_flows2(labels[n]) for n in trange(nimg)])
+        # concatenate flows with cell probability
+        flows = [np.concatenate((np.expand_dims(labels[n], axis=0)>0, veci[n]), axis=0).astype(np.float32)
+                    for n in range(nimg)]
+    else:
+        print('flows precomputed')
+        if labels[0].shape[0] > 3:
+            flows = [labels[n][1:].astype(np.float32) for n in range(nimg)]
+        else:
+            flows = [labels[n].astype(np.float32) for n in range(nimg)]
+    return flows, diam
+
+
 def masks_to_flows2(masks):
     """ 
     use the geodesics distance transform and np.gradient to create flow map
@@ -190,17 +230,21 @@ def masks_to_flows2(masks):
 
     Ly, Lx = masks.shape
     mu = np.zeros((2, Ly, Lx), np.float64)
-
+    dia = utils.diameters(masks)[0]
     slices = scipy.ndimage.find_objects(masks)
     for i,si in enumerate(slices):
         if si is not None:
             sr,sc = si
-            submask = masks[si]
+            submask = masks[si].copy()
             m = submask!=(i+1)
             y,x = np.nonzero(~m)
-
+            ## drop 1 pixel width label
+            if len(np.unique(x))<2 or len(np.unique(y))<2:
+                continue
             centroid = scipy.ndimage.measurements.center_of_mass(submask, labels=submask, index=(i+1))
-            c = tuple(np.round(np.array(centroid)).astype(int))
+            ## make sure the centroid is inside the mask otherwise take the point closest to the centroid
+            idx_c = np.argmin((y-centroid[0])**2 + (x-centroid[1])**2)
+            c = (y[idx_c], x[idx_c])
             ## set the centroid to 0 as the for GDT
             submask[c]=0 
             m_submask = ma.masked_array(submask, m)
@@ -212,8 +256,9 @@ def masks_to_flows2(masks):
             smoothed_y = ma.masked_array(scipy.ndimage.uniform_filter(ma.filled(g_dy,0), size=3),m)
             smoothed_x = ma.masked_array(scipy.ndimage.uniform_filter(ma.filled(g_dx,0), size=3),m)
             mu[:, sr.start + y, sc.start + x] = np.stack((smoothed_y.compressed(),smoothed_x.compressed()))
-
-    return mu
+    
+    ## the GDT method give flow in the opposite direction as the original method. multiply by -1 to make it compatible
+    return -1. * mu, dia
 
 
 @njit('(float32[:,:,:,:],float32[:,:,:,:], int32[:,:], int32)')
