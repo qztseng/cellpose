@@ -436,7 +436,8 @@ def random_rotate_and_resize(X, Y=None, scale_range=1., xy = (224,224), do_flip=
 
         # generate random augmentation parameters
         flip = np.random.rand()>.5
-        theta = np.random.rand() * np.pi * 2
+#         theta = np.random.rand() * np.pi * 2
+        theta=0.785
         scale[n] = (1-scale_range/2) + scale_range * np.random.rand()
         if rescale is not None:
             scale[n] *= 1. / rescale[n]
@@ -473,7 +474,8 @@ def random_rotate_and_resize(X, Y=None, scale_range=1., xy = (224,224), do_flip=
                 lbl[n,k] = cv2.warpAffine(labels[k], M, (xy[0],xy[1]), flags=cv2.INTER_NEAREST)
             else:
                 lbl[n,k] = cv2.warpAffine(labels[k], M, (xy[0],xy[1]), flags=cv2.INTER_LINEAR)
-        
+
+        ## to correct the rotated flow into original x,y direction
         if nt>1:
             v1 = lbl[n,2].copy()
             v2 = lbl[n,1].copy()
